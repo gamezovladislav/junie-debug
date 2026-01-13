@@ -1,0 +1,184 @@
+diff -ru '--exclude=jetbrains-junie-cli-576.1.0.tgz' package.orig/bin/index.js package/bin/index.js
+--- package.orig/bin/index.js	1985-10-26 09:15:00.000000000 +0100
++++ package/bin/index.js	2026-01-13 21:47:05.651612292 +0100
+@@ -6,6 +6,9 @@
+   try {
+     const exe = getExecutable()
+     const result = spawnSync(exe, process.argv.slice(2), {stdio: 'inherit'})
++    if (result.error) {
++      throw result.error
++    }
+     process.exit(result.status ?? 0)
+   } catch (error) {
+     console.error('[Junie] Error:', error.message)
+@@ -13,4 +16,4 @@
+   }
+ }
+ 
+-main()
+\ No newline at end of file
++main()
+diff -ru '--exclude=jetbrains-junie-cli-576.1.0.tgz' package.orig/getExecutable.js package/getExecutable.js
+--- package.orig/getExecutable.js	1985-10-26 09:15:00.000000000 +0100
++++ package/getExecutable.js	2026-01-13 21:47:01.886669955 +0100
+@@ -1,34 +1,69 @@
+ const fs = require('fs')
+ const path = require('path')
+-const { platform } = require("node:os")
++const os = require("node:os")
+ 
+ function getExpectedBinaryPath() {
+   const workDir = path.resolve(__dirname, 'bin', 'junie')
+ 
+-  return platform() === 'darwin'
++  return os.platform() === 'darwin'
+     ? path.join(workDir, 'Applications', 'junie.app', 'Contents', 'MacOS', 'junie')
+     : path.join(workDir, 'junie', 'bin', 'junie')
+ }
+ 
++function readMarkerPath(markerFile) {
++  if (!fs.existsSync(markerFile)) return null
++  try {
++    const content = fs.readFileSync(markerFile, 'utf8').trim()
++    return content.length ? content : null
++  } catch {
++    return null
++  }
++}
++
++function buildMissingBinaryMessage({ resolvedPath, expectedPath, markerFile, markerPath }) {
++  const markerStatus = fs.existsSync(markerFile)
++    ? (markerPath ? markerPath : '<empty>')
++    : '<missing>'
++
++  const hint = [
++    'Reinstall with scripts enabled:',
++    'npm config set ignore-scripts false && npm rebuild @jetbrains/junie-cli --foreground-scripts',
++    'If you are behind a proxy, ensure GitHub downloads are reachable.',
++  ].join(' ')
++
++  return [
++    `Junie binary not found at ${resolvedPath || '<undefined>'}.`,
++    `platform=${os.platform()} arch=${os.arch()}`,
++    `expected=${expectedPath}`,
++    `marker=${markerStatus}`,
++    hint,
++  ].join(' ')
++}
+ 
+ function getExecutable() {
+   const markerFile = path.resolve(__dirname, 'bin', 'junie.download')
++  const expectedPath = getExpectedBinaryPath()
++  const envPath = process.env.JUNIE_BINARY_PATH || process.env.JUNIE_BINARY
++  const markerPath = readMarkerPath(markerFile)
+ 
+-  if (fs.existsSync(markerFile)) {
+-    const binaryPath = getExpectedBinaryPath()
++  const resolvedPath = envPath || markerPath || expectedPath
+ 
+-    if (fs.existsSync(binaryPath)) {
+-      return binaryPath
+-    } else {
+-      console.error('Junie binary not found. Please re-install the package')
+-    }
+-  } else {
+-    console.error('Junie download is corrupted. Please re-install the package')
++  if (resolvedPath && fs.existsSync(resolvedPath)) {
++    return resolvedPath
+   }
++
++  const error = new Error(buildMissingBinaryMessage({
++    resolvedPath,
++    expectedPath,
++    markerFile,
++    markerPath,
++  }))
++  error.code = 'JUNIE_BINARY_NOT_FOUND'
++  throw error
+ }
+ 
+ 
+ module.exports = {
+   getExpectedBinaryPath,
+   getExecutable,
+-};
+\ No newline at end of file
++};
+diff -ru '--exclude=jetbrains-junie-cli-576.1.0.tgz' package.orig/postinstall.js package/postinstall.js
+--- package.orig/postinstall.js	1985-10-26 09:15:00.000000000 +0100
++++ package/postinstall.js	2026-01-13 22:14:39.120773621 +0100
+@@ -4,6 +4,7 @@
+ const fs = require("fs")
+ const { pipeline } = require("stream/promises")
+ const unzipper = require('unzipper')
++const { execSync, spawnSync } = require("child_process")
+ const os = require("os")
+ const { getExpectedBinaryPath } = require("./getExecutable")
+ 
+@@ -86,15 +87,41 @@
+   }
+ }
+ 
++function extractWithSystemUnzip(zipPath, workDir) {
++  const result = spawnSync('unzip', ['-q', '-o', zipPath, '-d', workDir], { encoding: 'utf8' })
++
++  if (result.error) {
++    if (result.error.code === 'ENOENT') return false
++    throw result.error
++  }
++  if (result.status !== 0) {
++    const detail = (result.stderr || result.stdout || '').trim()
++    throw new Error(`unzip failed with exit code ${result.status}${detail ? `: ${detail}` : ''}`)
++  }
++  return true
++}
++
++async function extractZip(zipPath, workDir) {
++  if (process.env.JUNIE_FORCE_UNZIPPER !== '1') {
++    const usedSystem = extractWithSystemUnzip(zipPath, workDir)
++    if (usedSystem) return
++  }
++  await fs.createReadStream(zipPath).pipe(unzipper.Extract({ path: workDir })).promise()
++}
++
+ async function downloadAndInstall() {
+   const {arch, osName} = resolveTarget()
+-  const url = buildUrl({arch, osName})
++  const overrideUrl = process.env.JUNIE_DOWNLOAD_URL
++  const url = overrideUrl || buildUrl({arch, osName})
+   const workDir = path.resolve(__dirname, 'bin', 'junie')
+   const markerFile = path.resolve(__dirname, 'bin', 'junie.download')
+ 
+   fs.mkdirSync(workDir, {recursive: true})
+ 
+   const zipPath = path.join(workDir, 'junie.zip')
++  if (overrideUrl) {
++    console.log(`[Junie] Using JUNIE_DOWNLOAD_URL=${overrideUrl}`)
++  }
+   console.log(`[Junie] Downloading from ${url}`)
+ 
+   const res = await fetch(url)
+@@ -102,12 +129,15 @@
+ 
+   await pipeline(res.body, fs.createWriteStream(zipPath))
+ 
+-  await fs.createReadStream(zipPath).pipe(unzipper.Extract({ path: workDir })).promise()
++  await extractZip(zipPath, workDir)
+ 
+   chmodRecursive(workDir)
+   stripQuarantine(workDir)
+ 
+   const binaryPath = getExpectedBinaryPath()
++  if (!fs.existsSync(binaryPath)) {
++    throw new Error(`Expected Junie binary not found after extraction at ${binaryPath}.`)
++  }
+   // Re-assert main binary is executable (cheap, idempotent)
+   try { fs.chmodSync(binaryPath, 0o755); } catch {}
+ 
+@@ -129,4 +159,4 @@
+   }
+ }
+ 
+-main()
+\ No newline at end of file
++main()

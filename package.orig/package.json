@@ -1,0 +1,30 @@
+{
+  "name": "@jetbrains/junie-cli",
+  "version": "576.1.0",
+  "junieVersion": "576.1",
+  "description": "Junie command‑line client",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": "https://github.com/jetbrains-junie/junie",
+  "homepage": "https://github.com/jetbrains-junie/junie#readme",
+  "bugs": {
+    "url": "https://github.com/jetbrains-junie/junie/issues"
+  },
+  "main": "bin/index.js",
+  "bin": {
+    "junie": "bin/index.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/",
+    "postinstall.js",
+    "getExecutable.js"
+  ],
+  "dependencies": {
+    "unzipper": "0.12.3"
+  }
+}
